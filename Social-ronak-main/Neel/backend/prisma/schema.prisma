@@ -1,0 +1,312 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Company {
+  id           String   @id @default(uuid())
+  name         String
+  slug         String?  @unique
+  plan         String   @default("free")
+  logoUrl      String?
+  bio          String?
+  themeJson    String?  // Active theme JSON string
+  openaiApiKey String?  // User-provided OpenAI API Key
+  createdAt    DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users            User[]
+  draftPosts       DraftPost[]
+  scheduledPosts   ScheduledPost[]
+
+  posts            Post[]
+  aiGenerationLogs AiGenerationLog[]
+  metaConnections  MetaConnection[]
+  webhookLogs      WebhookLog[]
+  postSyncLogs     PostSyncLog[]
+  themes           Theme[]
+  reels            Reel[]
+  fans             Fan[]
+  hashtagGroups    HashtagGroup[]
+}
+
+model Theme {
+  id        String   @id @default(uuid())
+  companyId String
+  themeJson String   // Stores the full generated JSON from the LLM
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  company   Company  @relation(fields: [companyId], references: [id])
+}
+
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  password  String
+  resetToken String?
+  resetTokenExpires DateTime?
+  name      String
+  role      String   @default("member")
+  companyId String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  company        Company         @relation(fields: [companyId], references: [id])
+  draftPosts     DraftPost[]
+  scheduledPosts ScheduledPost[]
+  aiGenerationLogs AiGenerationLog[]
+}
+
+model DraftPost {
+  id        String   @id @default(uuid())
+  companyId String
+  userId    String
+  platform  String
+  content   String
+  topic     String?
+  tone      String?
+  audience  String?
+  cta       String?
+  mediaUrl  String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  company Company @relation(fields: [companyId], references: [id])
+  user    User    @relation(fields: [userId], references: [id])
+}
+
+model ScheduledPost {
+  id            String   @id @default(uuid())
+  companyId     String
+  userId        String
+  platform      String
+  content       String
+  mediaUrl      String?
+  mediaUrls     String?  // Comma-separated URLs for carousel/album multi-media
+  mediaType     String?  // IMAGE, VIDEO, REEL — used to route the correct Meta API endpoint
+  postType      String?  // SINGLE_IMAGE, CAROUSEL, ALBUM, REEL, VIDEO, TEXT
+  scheduledAt   DateTime
+  lastAttemptAt DateTime? // Track when the last publish attempt happened
+  status        String   @default("Scheduled")
+  jobId         String?
+  retryCount    Int      @default(0)
+  apiResponse   String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  company Company @relation(fields: [companyId], references: [id])
+  user    User        @relation(fields: [userId], references: [id])
+}
+
+
+
+model Post {
+  id              String    @id @default(uuid())
+  companyId       String
+  platform        String
+  externalPostId  String?
+  content         String
+  mediaUrl        String?
+  publishedAt     DateTime?
+  engagementCount Int       @default(0)
+  source          String    @default("platform") // Requirement: 'platform' or 'direct'
+  importedAt      DateTime? // Date when external post was fetched
+  isPublished     Boolean   @default(false) // True only when post has actually been published
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  isDeleted       Boolean   @default(false)
+  deletedAt       DateTime?
+
+  company     Company      @relation(fields: [companyId], references: [id])
+  postMetrics PostMetric[]
+  likes       Like[]
+  comments    Comment[]
+
+  @@unique([companyId, externalPostId])
+}
+
+model PostMetric {
+  id       String @id @default(uuid())
+  postId   String
+  metric   String
+  value    Int    @default(0)
+  recordedAt DateTime @default(now())
+
+  post Post @relation(fields: [postId], references: [id])
+}
+
+model AiGenerationLog {
+  id        String   @id @default(uuid())
+  companyId String
+  userId    String
+  prompt    String
+  response  String
+  platform  String
+  tokens    Int      @default(0)
+  createdAt DateTime @default(now())
+
+  company Company @relation(fields: [companyId], references: [id])
+  user    User    @relation(fields: [userId], references: [id])
+}
+
+model MetaConnection {
+  id                String   @id @default(uuid())
+  companyId         String
+  platform          String
+  accessToken       String
+  refreshToken      String?
+  tokenType         String?  @default("bearer")
+  expiresAt         DateTime?
+  pageId            String?
+  igAccountId       String?
+  appId             String?
+  appSecret         String?
+  apiKey            String?
+  apiSecret         String?
+  accessTokenSecret String?
+  authorUrn         String?
+  isActive          Boolean  @default(true)
+  scopes            String?  @default("") // Requirement: track granted scopes
+  lastFetchAt       DateTime? // Requirement: track last time posts were fetched
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@unique([companyId, platform])
+}
+
+model PostSyncLog {
+  id               String   @id @default(uuid())
+  companyId        String
+  platform         String
+  status           String   // 'success' | 'failed'
+  message          String?
+  newPosts         Int      @default(0)
+  totalFetched     Int      @default(0)
+  duplicatesSkipped Int     @default(0)
+  createdAt        DateTime @default(now())
+
+  company Company @relation(fields: [companyId], references: [id])
+}
+
+model WebhookLog {
+  id        String   @id @default(uuid())
+  companyId String
+  direction String
+  endpoint  String
+  payload   String
+  status    String
+  response  String?
+  createdAt DateTime @default(now())
+
+  company Company @relation(fields: [companyId], references: [id])
+}
+model SystemConfig {
+  id        String   @id @default(uuid())
+  key       String   @unique
+  value     String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model PostLike {
+  id        String   @id @default(uuid())
+  postId    String
+  userId    String
+  createdAt DateTime @default(now())
+
+  @@unique([postId, userId])
+}
+
+model PostComment {
+  id        String   @id @default(uuid())
+  postId    String
+  userId    String
+  userName  String   @default("Guest")
+  content   String
+  createdAt DateTime @default(now())
+}
+
+model PostShare {
+  id        String   @id @default(uuid())
+  postId    String
+  userId    String
+  createdAt DateTime @default(now())
+}
+
+model Fan {
+  id             String    @id @default(cuid())
+  name           String
+  email          String
+  password       String
+  resetToken     String?
+  resetTokenExpires DateTime?
+  profileImage   String?
+  companyId      String?
+  createdAt      DateTime  @default(now())
+  company        Company?  @relation(fields: [companyId], references: [id])
+  likes          Like[]
+  comments       Comment[]
+
+  @@unique([email, companyId])
+}
+
+
+model Reel {
+  id          String    @id @default(cuid())
+  companyId   String
+  videoUrl    String
+  caption     String?
+  createdAt   DateTime  @default(now())
+  company     Company   @relation(fields: [companyId], references: [id])
+  likes       Like[]
+  comments    Comment[]
+}
+
+model Like {
+  id         String    @id @default(cuid())
+  fanId      String
+  postId     String?
+  reelId     String?
+  createdAt  DateTime  @default(now())
+  fan        Fan       @relation(fields: [fanId], references: [id])
+  post       Post?     @relation(fields: [postId], references: [id])
+  reel       Reel?     @relation(fields: [reelId], references: [id])
+
+  @@unique([fanId, postId])
+  @@unique([fanId, reelId])
+}
+
+model Comment {
+  id         String    @id @default(cuid())
+  fanId      String
+  postId     String?
+  reelId     String?
+  text       String
+  createdAt  DateTime  @default(now())
+  fan        Fan       @relation(fields: [fanId], references: [id])
+  post       Post?     @relation(fields: [postId], references: [id])
+  reel       Reel?     @relation(fields: [reelId], references: [id])
+}
+
+model HashtagGroup {
+  id        String   @id @default(cuid())
+  companyId String
+  name      String
+  hashtags  String
+  createdAt DateTime @default(now())
+  company   Company  @relation(fields: [companyId], references: [id])
+}
+
+model HashtagCache {
+  id            String   @id @default(cuid())
+  hashtag       String   @unique
+  resultCount   Int      @default(0)
+  lastFetchedAt DateTime @default(now())
+}

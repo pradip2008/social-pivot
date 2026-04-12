@@ -1,0 +1,64 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --foreground-rgb: 255, 255, 255;
+  --background-start-rgb: 0, 0, 0;
+  --background-end-rgb: 0, 0, 0;
+  
+  /* Dynamic Theme Variables - Fallback to default cyan */
+  --theme-primary: #06b6d4;
+  --theme-accent: #3b82f6;
+}
+
+@layer base {
+    body {
+        @apply bg-background text-white font-sans;
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+    }
+}
+
+/* ReactQuill Dark Theme Overrides */
+.ql-toolbar.ql-snow {
+    border-color: #374151 !important;
+    background: #111 !important;
+}
+.ql-toolbar.ql-snow .ql-stroke {
+    stroke: #9ca3af !important;
+}
+.ql-toolbar.ql-snow .ql-fill {
+    fill: #9ca3af !important;
+}
+.ql-toolbar.ql-snow .ql-picker-label {
+    color: #9ca3af !important;
+}
+.ql-toolbar.ql-snow .ql-picker-options {
+    background-color: #1f2937 !important;
+    border-color: #374151 !important;
+}
+.ql-toolbar.ql-snow .ql-picker-item {
+    color: #d1d5db !important;
+}
+.ql-container.ql-snow {
+    border-color: #374151 !important;
+    background: transparent !important;
+}
+.ql-editor {
+    color: #ffffff !important;
+    font-size: 1rem;
+}
+.ql-editor.ql-blank::before {
+    color: #6b7280 !important;
+    font-style: italic;
+}
+.ql-snow .ql-picker.ql-expanded .ql-picker-label {
+    color: #06b6d4 !important;
+}
+.ql-snow .ql-active .ql-stroke {
+    stroke: #06b6d4 !important;
+}
+.ql-snow .ql-active .ql-fill {
+    fill: #06b6d4 !important;
+}
