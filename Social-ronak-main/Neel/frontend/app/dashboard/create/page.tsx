@@ -3,7 +3,8 @@
 import { useState, useRef, useEffect, DragEvent, ChangeEvent } from 'react';
 import api from '@/lib/api';
 import toast from 'react-hot-toast';
-import { FiFacebook, FiInstagram, FiImage, FiVideo, FiLink, FiType, FiCalendar, FiSend, FiTrash2, FiClock, FiPlus, FiChevronRight, FiCheckCircle } from 'react-icons/fi';
+import { FiFacebook, FiInstagram, FiImage, FiVideo, FiLink, FiType, FiCalendar, FiSend, FiTrash2, FiClock, FiPlus, FiChevronRight, FiCheckCircle, FiAlertCircle } from 'react-icons/fi';
+import { autoResizeImageForSocialMedia } from '@/lib/imageResizer';
 
 const FacebookIcon = () => (
     <svg viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5">
@@ -101,17 +102,101 @@ export default function CreatePostPage() {
   const isLink = postType === 'LINK';
 
   const uploadFile = async (file: File) => {
-    const formData = new FormData();
-    formData.append('file', file);
     try {
-      setUploadingProgress(`Uploading... ${file.name}`);
-      const res = await api.post('/media/upload', formData, {
-        params: { platform: platform.toUpperCase(), postType }
+      setUploadingProgress(`Preparing... ${file.name}`);
+      
+      // Detect file type by MIME and extension (both needed for reliability)
+      const isImage = file.type.startsWith('image/');
+      const isVideo = file.type.startsWith('video/');
+      const ext = file.name.split('.').pop()?.toLowerCase() || '';
+      const isVideoByExt = ['mp4', 'mov', 'avi', 'mkv', 'webm', 'flv', 'wmv'].includes(ext);
+      
+      // Treat as video if MIME OR extension indicates video
+      const treatAsVideo = isVideo || isVideoByExt;
+      let fileToUpload = file;
+
+      // ===== IMAGE HANDLING =====
+      if (isImage && !treatAsVideo) {
+        try {
+          // Auto-resize image to Instagram/Facebook requirements
+          console.log(`[Create] Auto-resizing image: ${file.name}`);
+          const resizeResult = await autoResizeImageForSocialMedia(
+            file,
+            platform,
+            postType
+          );
+          
+          toast.success(resizeResult.message);
+          console.log(`[Create] ${resizeResult.message}`);
+          
+          fileToUpload = resizeResult.file;
+        } catch (err: any) {
+          // If resize fails, use original image
+          console.error(`[Create] Auto-resize failed: ${err.message}`);
+          toast.warning(
+            `Could not auto-resize. Uploading original image - make sure it meets ${platform} requirements.`
+          );
+        }
+      }
+      // ===== VIDEO HANDLING =====
+      else if (treatAsVideo) {
+        // Accept all video formats - Instagram/Facebook will validate
+        const validFormats = ['mp4', 'mov', 'avi', 'mkv', 'webm', 'flv', 'wmv', '3gp'];
+        if (!validFormats.includes(ext || '')) {
+          toast.error(`❌ Unknown video format: .${ext}`);
+          console.log(`[Create] Rejected unknown video format: ${file.name}`);
+          setUploadingProgress('');
+          return null;
+        }
+
+        // Check file size
+        const maxSizeBytes = platform === 'Instagram' ? 100 * 1024 * 1024 : 500 * 1024 * 1024;
+        if (file.size > maxSizeBytes) {
+          const maxMB = Math.round(maxSizeBytes / (1024 * 1024));
+          const sizeMB = Math.round(file.size / (1024 * 1024));
+          toast.error(`❌ Video too large (${sizeMB}MB, max ${maxMB}MB)`);
+          console.log(`[Create] Video too large: ${sizeMB}MB`);
+          setUploadingProgress('');
+          return null;
+        }
+
+        toast.success(`✓ Video ready (.${ext})`);
+        console.log(`[Create] Video validated: ${file.name}`);
+      }
+
+      // ===== UPLOAD TO SERVER =====
+      const formData = new FormData();
+      formData.append('file', fileToUpload);
+
+      setUploadingProgress(`Uploading... ${fileToUpload.name}`);
+
+      const query = new URLSearchParams({
+        platform: platform.toUpperCase(),
+        postType: postType,
       });
-      return { url: res.data.url, filename: res.data.filename, mimeType: res.data.mimeType };
+
+      const res = await api.post(`/media/upload?${query.toString()}`, formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
+
+      console.log(`[Create] Upload successful: ${fileToUpload.name} → ${res.data.url}`);
+      toast.success(`Uploaded successfully!`);
+      
+      return {
+        url: res.data.url,
+        filename: res.data.filename,
+        mimeType: res.data.mimeType,
+      };
     } catch (err: any) {
-      toast.error(err.response?.data?.message || err.message || 'Upload failed');
+      const errMsg =
+        err.response?.data?.message ||
+        err.message ||
+        'Upload failed. Try again with a different file.';
+      console.error(`[Create] Upload failed: ${errMsg}`);
+      toast.error(errMsg);
       return null;
+    } finally {
+      setUploadingProgress('');
     }
   };
 
@@ -157,15 +242,49 @@ export default function CreatePostPage() {
 
   const buildPayload = () => {
     const mediaUrls = mediaItems.map(x => x.url);
-    return {
+    
+    // Determine mediaType from either MIME type or filename extension
+    let mediaType: string | undefined;
+    if (mediaItems.length > 0) {
+      const mimeType = mediaItems[0].mimeType || '';
+      const filename = mediaItems[0].filename || '';
+      const ext = filename.split('.').pop()?.toLowerCase() || '';
+      
+      // Check if video by MIME type OR extension
+      const isVideo = mimeType.startsWith('video/') || ['mp4', 'mov', 'avi', 'mkv', 'webm', 'flv', 'wmv'].includes(ext);
+      mediaType = isVideo ? 'VIDEO' : 'IMAGE';
+      
+      // DEBUG Log
+      console.log(`[Create] buildPayload mediaType detection:`, {
+        mimeType,
+        filename,
+        ext,
+        isVideo,
+        mediaType,
+      });
+    }
+    
+    const payload = {
       platform,
       content: caption,
       mediaUrl: isLink ? linkUrl : (mediaUrls.length > 0 ? mediaUrls[0] : undefined),
-      mediaType: mediaItems.length > 0 ? (mediaItems[0].mimeType.startsWith('video') ? 'VIDEO' : 'IMAGE') : undefined,
+      mediaType,
       postType,
       mediaUrls: mediaUrls.length > 1 ? mediaUrls : undefined,
       linkUrl: isLink ? linkUrl : undefined,
     };
+    
+    // Final payload log
+    console.log(`[Create] Final payload for ${platform}:`, {
+      platform: payload.platform,
+      contentLength: payload.content?.length,
+      mediaUrl: payload.mediaUrl,
+      mediaType: payload.mediaType,
+      postType: payload.postType,
+      hasMultipleMedia: !!payload.mediaUrls,
+    });
+    
+    return payload;
   };
 
   const handlePublish = async () => {
@@ -186,7 +305,14 @@ export default function CreatePostPage() {
   };
 
   const handleSchedule = async () => {
+    // FRONTEND VALIDATION: Same checks as handlePublish
     if (!scheduledAt) return toast.error('Select a date and time');
+    if (needsMedia && mediaItems.length === 0 && !isLink) {
+      return toast.error(`${platform} requires media (image/video). Please add media before scheduling.`);
+    }
+    if (!caption.trim() && !isLink) return toast.error('Content is required');
+    if (isOverLimit) return toast.error('Content exceeds character limit');
+    
     setIsScheduling(true);
     try {
       await api.post('/posts/schedule', { ...buildPayload(), scheduledAt: new Date(scheduledAt).toISOString() });

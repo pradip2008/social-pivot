@@ -72,6 +72,7 @@ export class ScheduledPostProcessor {
       }
 
       // Attempt to publish via Meta API (routes by postType for carousel/album/reel)
+      this.logger.debug(`[Processor] Publishing to ${platform} with mediaUrl: ${mediaUrl}, mediaType: ${mediaType}, postType: ${postType}`);
       const result = await this.metaService.publishPost(
         companyId,
         platform,
@@ -84,6 +85,7 @@ export class ScheduledPostProcessor {
 
       if (!result.success) {
         // ISSUE 5: Check if this is a rate limit error from Meta
+        this.logger.warn(`[Processor] Publish failed for ${platform}: ${result.message}`);
         const isRateLimited = this.isRateLimitError(result.message, (result as any).rawError);
         if (isRateLimited) {
           throw new Error(`RATE_LIMITED: ${result.message}`);
@@ -92,11 +94,12 @@ export class ScheduledPostProcessor {
       }
 
       this.logger.log(
-        `✅ Post ${scheduledPostId} published via Meta API (postId: ${result.postId})`,
+        `✅ Post ${scheduledPostId} published via Meta API (platform: ${platform}, postId: ${result.postId})`,
       );
 
       // Only sync to Post feed if successful
       // Upsert to handle potential race condition with background sync
+      this.logger.log(`[Processor] Saving post to database (postId: ${result.postId})`);
       await this.prisma.post.upsert({
         where: {
           companyId_externalPostId: {
@@ -120,6 +123,7 @@ export class ScheduledPostProcessor {
           isPublished: true,
         },
       });
+      this.logger.log(`[Processor] ✓ Post saved to database`);
 
       // Update scheduled post status to Sent
       await this.prisma.scheduledPost.update({

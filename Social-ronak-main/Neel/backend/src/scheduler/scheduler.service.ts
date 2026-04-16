@@ -222,7 +222,44 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
   }
 
   async schedulePost(userId: string, companyId: string, data: any) {
-    const { platform, content, scheduledAt, mediaUrl, mediaType, postType, mediaUrls } = data;
+    const { platform, content, scheduledAt, mediaUrl, mediaType, postType, mediaUrls, linkUrl } = data;
+
+    // DEBUG: Log all incoming data
+    this.logger.debug(`[SchedulerService.schedulePost] Received params:`, {
+      platform,
+      contentLength: content?.length,
+      mediaUrl: mediaUrl || 'undefined',
+      mediaType: mediaType || 'undefined',
+      postType: postType || 'undefined',
+      mediaUrls: mediaUrls ? (Array.isArray(mediaUrls) ? `[${mediaUrls.length} items]` : mediaUrls) : 'undefined',
+      linkUrl: linkUrl || 'undefined',
+      scheduledAt,
+      allDataKeys: Object.keys(data),
+    });
+
+    // ISSUE FIX: Validate required fields before scheduling
+    const p = platform.toLowerCase();
+    
+    // Instagram always requires media
+    if (p === 'instagram') {
+      if (!mediaUrl && (!mediaUrls || mediaUrls.length === 0)) {
+        throw new Error(`Instagram posts require media (image, video, or reel). Please upload a media file before scheduling.`);
+      }
+    }
+    
+    // Facebook posts require media or link
+    if (p === 'facebook') {
+      const hasMedia = mediaUrl || (mediaUrls && mediaUrls.length > 0);
+      const hasLink = linkUrl;
+      if (!hasMedia && !hasLink) {
+        throw new Error(`Facebook posts require either media (image/video) or a link URL. Please add media or a link before scheduling.`);
+      }
+    }
+
+    // Validate content is not empty
+    if (!content || content.trim().length === 0) {
+      throw new Error(`Post content is required. Please enter post text before scheduling.`);
+    }
 
     // Fix #1: Store mediaUrls as JSON string (not comma-separated) for ordered arrays and no parsing bugs
     const mediaUrlsString = Array.isArray(mediaUrls) && mediaUrls.length > 0

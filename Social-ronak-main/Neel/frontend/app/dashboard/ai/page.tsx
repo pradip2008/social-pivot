@@ -48,6 +48,12 @@ export default function AiGenerator() {
             return;
         }
 
+        // INSTAGRAM REQUIRES MEDIA - cannot schedule text-only on Instagram
+        if (platform === 'Instagram') {
+            toast.error('Instagram does not support text-only posts. Please use Create & Schedule to add media (image, video, or carousel) to your Instagram posts.');
+            return;
+        }
+
         const selectedTime = new Date(scheduleDate);
         const isPast = selectedTime.getTime() <= Date.now();
 

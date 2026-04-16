@@ -799,30 +799,153 @@ export class MetaService {
     ): Promise<{ success: boolean; postId?: string; message?: string; rawError?: any }> {
         try {
             if (!mediaUrl) return { success: false, message: 'Instagram requires media.' };
+            if (!igAccountId) return { success: false, message: 'Instagram account ID is missing. Please reconnect your Instagram account.' };
+            
             const finalMediaUrl = this.ensurePublicUrl(mediaUrl)!;
+            
+            // DEBUG: Log all media detection info
+            this.logger.log(`[IG Publish] Media Detection:`);
+            this.logger.log(`  - Provided mediaType: "${mediaType}"`);
+            this.logger.log(`  - Media URL: ${finalMediaUrl}`);
+            this.logger.log(`  - URL file extension: ${finalMediaUrl.split('.').pop()}`);
+
+            // Check URL reachability but don't fail - just log a warning
+            // (Some URLs might be blocked from HEAD requests or temporarily unreachable)
+            const isUrlReachable = await this.verifyMediaUrlReachable(finalMediaUrl).catch(() => false);
+            if (!isUrlReachable) {
+                this.logger.warn(`Media URL may not be publicly accessible (will attempt upload anyway): ${finalMediaUrl}`);
+            } else {
+                this.logger.debug(`Media URL verified as accessible: ${finalMediaUrl}`);
+            }
 
             const resolvedMediaType = (mediaType || '').toUpperCase();
-            const isVideo = resolvedMediaType === 'VIDEO' || resolvedMediaType === 'REEL' || finalMediaUrl.match(/\.(mp4|mov|avi|mkv|webm)$/i);
+            // Accept any video format - Instagram will validate on their side
+            const isVideo = resolvedMediaType === 'VIDEO' || resolvedMediaType === 'REEL' || finalMediaUrl.match(/\.(mp4|mov|avi|mkv|webm|flv|wmv|3gp)$/i);
             const isReel = resolvedMediaType === 'REEL';
 
-            const payload: any = { caption: content, access_token: accessToken };
+            // ===== BUILD CLEAN PAYLOAD =====
+            // ONLY include caption if it exists and is not empty
+            const payload: any = { access_token: accessToken };
+            if (content && content.trim()) {
+                payload.caption = content.trim();
+            }
+            
             if (isReel) {
+                // For Reels: media_type, video_url, caption, share_to_feed
                 payload.media_type = 'REELS';
                 payload.video_url = finalMediaUrl;
                 payload.share_to_feed = true;
+                this.logger.debug(`[IG Publish] Detected as REEL - Payload keys: ${Object.keys(payload).join(', ')}`);
             } else if (isVideo) {
+                // For Videos: media_type, video_url, caption
                 payload.media_type = 'VIDEO';
                 payload.video_url = finalMediaUrl;
+                this.logger.debug(`[IG Publish] Detected as VIDEO - Payload keys: ${Object.keys(payload).join(', ')}`);
             } else {
+                // For Images: media_type, image_url, caption
+                payload.media_type = 'IMAGE';
                 payload.image_url = finalMediaUrl;
+                this.logger.debug(`[IG Publish] Detected as IMAGE - Payload keys: ${Object.keys(payload).join(', ')}`);
             }
 
-            const { data: { id: containerId } } = await axios.post(`${GRAPH_API_BASE}/${igAccountId}/media`, payload, { timeout: 60000 });
-            await this.pollMediaContainer(accessToken, containerId, 'IG');
-            const { data } = await axios.post(`${GRAPH_API_BASE}/${igAccountId}/media_publish`, { creation_id: containerId, access_token: accessToken }, { timeout: 30000 });
-            return { success: true, postId: data.id };
+            let containerId: string;
+            try {
+                const mediaLabel = isReel ? 'Reel' : isVideo ? 'Video' : 'Image';
+                const payloadLog = { ...payload };
+                if (payloadLog.access_token) payloadLog.access_token = '[REDACTED]'; // Don't log token
+                this.logger.log(`[IG Publish] Creating ${mediaLabel} media container for account ${igAccountId}`);
+                this.logger.log(`[IG Publish] Payload Fields: ${Object.keys(payload).filter(k => k !== 'access_token').join(', ')}`);
+                this.logger.debug(`[IG Publish] Full Payload: ${JSON.stringify(payloadLog)}`);
+                this.logger.debug(`[IG Publish] Media URL: ${finalMediaUrl}`);
+                
+                const { data: { id } } = await axios.post(`${GRAPH_API_BASE}/${igAccountId}/media`, payload, { timeout: 60000 });
+                containerId = id;
+                this.logger.log(`[IG Publish] ✓ Container created: ${containerId}`);
+            } catch (error: any) {
+                const msg = error.response?.data?.error?.message || error.message;
+                const errorCode = error.response?.data?.error?.code;
+                
+                this.logger.error(`[IG Publish] Failed to create container: ${msg} (Code: ${errorCode})`);
+                this.logger.debug(`[IG Publish] Full error: ${JSON.stringify(error.response?.data || error)}`);
+                
+                // Handle specific Instagram media errors
+                if (msg.includes('aspect ratio') || msg.includes('Aspect ratio')) {
+                    return { success: false, message: `Image aspect ratio not supported by Instagram. Try resizing to 1080x1080px (square) or 1080x1350px (4:5 portrait).` };
+                }
+                if (msg.includes('transcoding') || msg.includes('Transcoding error')) {
+                    return { success: false, message: `Instagram cannot process this video. Try: (1) Different format (MP4 or MOV), (2) Lower resolution, (3) Shorter duration (< 60 min).` };
+                }
+                if (errorCode === 100 || msg.includes('Invalid parameter')) {
+                    // Just relay the error without being prescriptive
+                    this.logger.error(`[IG Publish] Instagram API error: ${msg}`);
+                    return { success: false, message: `Instagram rejected the upload. Error: ${msg}. Try re-uploading or use a different video format.` };
+                }
+                if (errorCode === 400 || msg.includes('(#400)')) {
+                    return { success: false, message: `Bad request to Instagram. Error: ${msg}` };
+                }
+                if (msg.includes('timeout') || error.code === 'ECONNABORTED') {
+                    return { success: false, message: 'Upload timed out. Try again or use a smaller file.' };
+                }
+                if (msg.includes('host') || msg.includes('unreachable') || msg.includes('ERR_INVALID_URL')) {
+                    return { success: false, message: `Cannot access media URL. Ensure your network connection is stable and try again.` };
+                }
+                return { success: false, message: `Failed to upload: ${msg}` };
+            }
+
+            try {
+                const mediaTypeLabel = isReel ? 'Reel' : isVideo ? 'Video' : 'Image';
+                this.logger.log(`[IG Publish] Polling container ${containerId}...`);
+                await this.pollMediaContainer(accessToken, containerId, `Instagram ${mediaTypeLabel}`);
+                this.logger.log(`[IG Publish] ✓ Container ready`);
+            } catch (error: any) {
+                // pollMediaContainer already throws descriptive errors
+                throw error;
+            }
+
+            try {
+                this.logger.log(`[IG Publish] Publishing container ${containerId}...`);
+                
+                // For videos, add a small delay to ensure full processing
+                const isReel = resolvedMediaType === 'REEL';
+                const isVideoType = isVideo || isReel;
+                if (isVideoType) {
+                  this.logger.debug(`[IG Publish] Waiting 3s before publishing video/reel to ensure processing...`);
+                  await new Promise(resolve => setTimeout(resolve, 3000));
+                }
+                
+                const { data } = await axios.post(
+                  `${GRAPH_API_BASE}/${igAccountId}/media_publish`,
+                  { creation_id: containerId, access_token: accessToken },
+                  { timeout: 30000 }
+                );
+                this.logger.log(`[IG Publish] ✅ SUCCESS! Posted with ID: ${data.id}`);
+                return { success: true, postId: data.id };
+            } catch (error: any) {
+                const msg = error.response?.data?.error?.message || error.message;
+                const errorCode = error.response?.data?.error?.code;
+                
+                this.logger.error(`[IG Publish] Failed to publish container: ${msg} (Code: ${errorCode})`);
+                
+                if (errorCode === 470) {
+                    return { success: false, message: 'Cannot publish. Media unavailable, account restricted, or daily limits reached. Try again later.' };
+                }
+                if (msg.includes('aspect ratio') || msg.includes('Aspect ratio')) {
+                    return { success: false, message: `Image aspect ratio not supported. Resize image to 4:5 to 1.91:1 ratio and try again.` };
+                }
+                if (errorCode === 100 || msg.includes('Invalid parameter')) {
+                    // This is often a video format issue
+                    const mediaTypeHint = isReel ? 'Reel' : isVideo ? 'Video' : 'Media';
+                    return { success: false, message: `${mediaTypeHint} rejected by Instagram. Try: (1) MP4 format with H.264 codec, (2) Smaller file size, (3) Shorter duration (< 60 min for videos, < 90 min for Reels).` };
+                }
+                if (errorCode === 400 || msg.includes('MISSING_SCOPES')) {
+                    return { success: false, message: 'Missing Instagram publishing permissions. Reconnect your Instagram account.' };
+                }
+                return { success: false, message: `Failed to publish: ${msg}` };
+            }
         } catch (error: any) {
-            return { success: false, message: error.response?.data?.error?.message || error.message, rawError: error.response?.data?.error };
+            const msg = error.message || error.response?.data?.error?.message || 'Unknown error';
+            this.logger.error(`[IG Publish] Unexpected error: ${msg}`);
+            return { success: false, message: msg, rawError: error.response?.data?.error };
         }
     }
 
@@ -1176,17 +1299,44 @@ async publishLinkedInMedia(accessToken: string, authorUrn: string, content: stri
     async publishPost(companyId: string, platform: string, content: string, mediaUrl?: string, mediaType?: string, postType?: string, mediaItems?: string[], linkUrl?: string): Promise<{ success: boolean; postId?: string; message?: string }> {
         const conn = await this.getConnectionForPlatform(companyId, platform);
         if (!conn || !conn.isActive) return { success: false, message: 'No connection' };
+        
         const p = platform.toLowerCase();
         const type = (postType || '').toUpperCase();
+        
+        // AUTO-DETECT mediaType if not provided (fallback safety)
+        let resolvedMediaType = mediaType;
+        if (!resolvedMediaType && mediaUrl) {
+            // Detect from URL file extension
+            const urlExt = mediaUrl.split('.').pop()?.toLowerCase() || '';
+            const videoExts = ['mp4', 'mov', 'avi', 'mkv', 'webm', 'flv', 'wmv', '3gp'];
+            if (videoExts.includes(urlExt)) {
+                resolvedMediaType = 'VIDEO';
+                this.logger.warn(`[Publish] mediaType not provided - auto-detected as VIDEO from URL extension (.${urlExt})`);
+            } else {
+                resolvedMediaType = 'IMAGE';
+                this.logger.warn(`[Publish] mediaType not provided - assuming IMAGE`);
+            }
+        }
+        
+        // ISSUE FIX: Validate critical connection fields before publishing
+        if (p === 'instagram' && !conn.igAccountId) {
+            this.logger.error(`[Instagram Publish] CRITICAL: igAccountId is missing for company ${companyId}. Connection data: ${JSON.stringify({ platform: conn.platform, pageId: conn.pageId, igAccountId: conn.igAccountId })}`);
+            return { success: false, message: 'Instagram account ID is not configured. Please reconnect your Instagram account in Settings.' };
+        }
+        if (p === 'facebook' && !conn.pageId) {
+            this.logger.error(`[Facebook Publish] CRITICAL: pageId is missing for company ${companyId}`);
+            return { success: false, message: 'Facebook Page ID is not configured. Please reconnect your Facebook account in Settings.' };
+        }
+        
         try {
             if (p === 'facebook') {
                 if (type === 'ALBUM') return this.publishFacebookAlbum(conn.accessToken, conn.pageId!, content, mediaItems || []);
                 if (type === 'FACEBOOK_REEL') return this.publishFacebookReel(conn.accessToken, conn.pageId!, content, mediaUrl!);
-                return this.publishToFacebook(conn.accessToken, conn.pageId!, content, mediaUrl, mediaType, linkUrl);
+                return this.publishToFacebook(conn.accessToken, conn.pageId!, content, mediaUrl, resolvedMediaType, linkUrl);
             }
             if (p === 'instagram') {
                 if (type === 'CAROUSEL') return this.publishInstagramCarousel(conn.accessToken, conn.igAccountId!, content, mediaItems || []);
-                return this.publishToInstagram(conn.accessToken, conn.igAccountId!, content, mediaUrl!, mediaType);
+                return this.publishToInstagram(conn.accessToken, conn.igAccountId!, content, mediaUrl!, resolvedMediaType);
             }
             if (p === 'twitter') {
                 const client = new TwitterApi({ appKey: conn.apiKey!, appSecret: conn.apiSecret!, accessToken: conn.accessToken, accessSecret: conn.accessTokenSecret! });
@@ -1208,7 +1358,7 @@ async publishLinkedInMedia(accessToken: string, authorUrn: string, content: stri
                     });
                 }
 
-                const linkedInMediaKind = this.resolveLinkedInMediaKind(mediaUrl, mediaType, type);
+                const linkedInMediaKind = this.resolveLinkedInMediaKind(mediaUrl, resolvedMediaType, type);
                 if (linkedInMediaKind) {
                     if (!mediaUrl) {
                         return { success: false, message: 'LinkedIn media posts require a mediaUrl.' };
@@ -1276,15 +1426,54 @@ async publishLinkedInMedia(accessToken: string, authorUrn: string, content: stri
         return [];
     }
 
-    async publishInstagramCarousel(a: string, ig: string, c: string, m: string[]) {
-        const ids = await Promise.all(m.map(async u => {
-            const { data } = await axios.post(`${GRAPH_API_BASE}/${ig}/media`, { image_url: this.ensurePublicUrl(u), is_carousel_item: true, access_token: a });
-            return data.id;
-        }));
-        const { data: { id } } = await axios.post(`${GRAPH_API_BASE}/${ig}/media`, { media_type: 'CAROUSEL', caption: c, children: ids, access_token: a });
-        await this.pollMediaContainer(a, id, 'IG Carousel');
-        const { data } = await axios.post(`${GRAPH_API_BASE}/${ig}/media_publish`, { creation_id: id, access_token: a });
-        return { success: true, postId: data.id };
+    async publishInstagramCarousel(a: string, ig: string, c: string, m: string[]): Promise<{ success: boolean; postId?: string; message?: string }> {
+        try {
+            if (!m || m.length === 0) {
+                return { success: false, message: 'Carousel requires at least 2 images.' };
+            }
+            if (m.length > 10) {
+                return { success: false, message: 'Carousel cannot have more than 10 images.' };
+            }
+
+            try {
+                this.logger.log(`Creating carousel items (${m.length} images)...`);
+                const ids = await Promise.all(m.map(async (u, idx) => {
+                    try {
+                        const publicUrl = this.ensurePublicUrl(u);
+                        if (!publicUrl) throw new Error(`Item ${idx + 1}: Invalid URL format`);
+                        this.logger.debug(`Carousel item ${idx + 1}/${m.length}: uploading ${publicUrl.substring(0, 50)}...`);
+                        const { data } = await axios.post(`${GRAPH_API_BASE}/${ig}/media`, { image_url: publicUrl, is_carousel_item: true, access_token: a }, { timeout: 45000 });
+                        this.logger.log(`✓ Carousel item ${idx + 1}/${m.length} created: ${data.id}`);
+                        return data.id;
+                    } catch (error: any) {
+                        const msg = error.response?.data?.error?.message || error.message;
+                        this.logger.error(`✗ Carousel item ${idx + 1} failed: ${msg}`);
+                        
+                        // Provide specific guidance based on error
+                        if (msg.includes('aspect ratio') || msg.includes('Aspect ratio')) {
+                            throw new Error(`Item ${idx + 1}: Image aspect ratio not supported. Use 1:1 (square) format. Resize all carousel images to 1080x1080px.`);
+                        }
+                        throw new Error(`Item ${idx + 1} failed: ${msg}`);
+                    }
+                }));
+
+                this.logger.log(`Creating carousel container with ${ids.length} items...`);
+                const { data: { id } } = await axios.post(`${GRAPH_API_BASE}/${ig}/media`, { media_type: 'CAROUSEL', caption: c, children: ids, access_token: a }, { timeout: 45000 });
+                
+                this.logger.log(`Polling carousel container ${id}...`);
+                await this.pollMediaContainer(a, id, 'Instagram Carousel');
+                
+                this.logger.log(`Publishing carousel...`);
+                const { data } = await axios.post(`${GRAPH_API_BASE}/${ig}/media_publish`, { creation_id: id, access_token: a }, { timeout: 30000 });
+                return { success: true, postId: data.id };
+            } catch (error: any) {
+                const msg = error.message || error.response?.data?.error?.message || 'Unknown carousel error';
+                this.logger.error(`Carousel failed: ${msg}`);
+                return { success: false, message: msg };
+            }
+        } catch (error: any) {
+            return { success: false, message: error.message || 'Carousel upload failed' };
+        }
     }
 
     async publishFacebookAlbum(
@@ -1502,13 +1691,62 @@ async publishLinkedInMedia(accessToken: string, authorUrn: string, content: stri
     }
 
     private async pollMediaContainer(t: string, id: string, label: string) {
-        for (let i = 0; i < 30; i++) {
-            const { data } = await axios.get(`${GRAPH_API_BASE}/${id}?fields=status_code&access_token=${t}`);
-            if (data.status_code === 'FINISHED') return;
-            if (data.status_code === 'ERROR') throw new Error(`${label} error`);
-            await new Promise(r => setTimeout(r, 5000));
+        const isVideo = label.toLowerCase().includes('video') || label.toLowerCase().includes('reel');
+        const maxWaitTimeMs = isVideo ? 180000 : 120000; // 3 min for video, 2 min for images
+        const startTime = Date.now();
+        let pollCount = 0;
+        
+        // Use dynamic backoff: start with 2s, then 5s, then 10s, then 15s
+        const getWaitTime = (attempt: number) => {
+            if (attempt < 5) return 2000;        // First 5: 2 seconds
+            if (attempt < 15) return 5000;       // Next 10: 5 seconds
+            if (attempt < 25) return 10000;      // Next 10: 10 seconds
+            return 15000;                        // After 25: 15 seconds
+        };
+        
+        for (let i = 0; i < 60; i++) {
+            try {
+                const { data } = await axios.get(`${GRAPH_API_BASE}/${id}?fields=status_code&access_token=${t}`, { timeout: 30000 });
+                pollCount++;
+                
+                if (data.status_code === 'FINISHED') {
+                    this.logger.debug(`${label} container ready after ${pollCount} polls (${(Date.now() - startTime) / 1000}s)`);
+                    return;
+                }
+                if (data.status_code === 'ERROR') {
+                    this.logger.error(`${label} container error after ${pollCount} polls`);
+                    throw new Error(`${label} media container processing failed. Please check the media URL and try again.`);
+                }
+                if (data.status_code === 'IN_PROGRESS' || data.status_code === 'QUEUED') {
+                    const elapsedMs = Date.now() - startTime;
+                    if (elapsedMs > maxWaitTimeMs) {
+                        throw new Error(`${label} processing timeout after ${Math.round(elapsedMs / 1000)}s. The media may be too large or the URL unreachable. Try a smaller file size and ensure the URL is publicly accessible.`);
+                    }
+                    const waitTime = getWaitTime(i);
+                    this.logger.debug(`${label} poll ${i + 1}: Status=${data.status_code}, waiting ${waitTime / 1000}s (elapsed: ${Math.round(elapsedMs / 1000)}s)`);
+                    await new Promise(r => setTimeout(r, waitTime));
+                    continue;
+                }
+                // Unknown status
+                this.logger.debug(`${label} unknown status: ${data.status_code}`);
+                await new Promise(r => setTimeout(r, getWaitTime(i)));
+            } catch (error: any) {
+                if (error.response?.status === 400 || error.code === 'ERR_BAD_REQUEST') {
+                    // Media ID invalid or expired
+                    throw new Error(`${label} media container invalid or expired. The upload may have failed. Try uploading again.`);
+                }
+                if (error.response?.status === 401 || error.response?.status === 403) {
+                    throw new Error(`${label} authentication failed. Your Instagram token may have expired. Please reconnect.`);
+                }
+                // For network errors, retry
+                if (error.code === 'ERR_NETWORK' || error.code === 'ECONNREFUSED') {
+                    await new Promise(r => setTimeout(r, getWaitTime(i)));
+                    continue;
+                }
+                throw error;
+            }
         }
-        throw new Error(`${label} timeout`);
+        throw new Error(`${label} processing timeout after ${Math.round((Date.now() - startTime) / 1000)}s. Verify the media URL is publicly accessible and try again.`);
     }
 
     private async getSystemMetaApp() { return { appId: process.env.META_APP_ID, appSecret: process.env.META_APP_SECRET }; }

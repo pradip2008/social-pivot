@@ -60,17 +60,60 @@ export class PostsController {
 
   @Post('schedule')
   async schedulePost(@Request() req: any, @Body() body: SchedulePostDto) {
-    return this.schedulerService.schedulePost(
-      req.user.sub,
-      req.user.companyId,
-      body,
-    );
+    console.log('[Posts Controller] Schedule request received:', {
+      platform: body.platform,
+      contentLength: body.content?.length,
+      mediaUrl: body.mediaUrl,
+      mediaType: body.mediaType,
+      postType: body.postType,
+      mediaUrls: body.mediaUrls ? (Array.isArray(body.mediaUrls) ? `[${body.mediaUrls.length} items]` : body.mediaUrls) : 'undefined',
+      scheduledAt: body.scheduledAt,
+      allKeys: Object.keys(body),
+    });
+    try {
+      return await this.schedulerService.schedulePost(
+        req.user.sub,
+        req.user.companyId,
+        body,
+      );
+    } catch (error: any) {
+      throw new BadRequestException(error.message || 'Failed to schedule post');
+    }
   }
 
   @Post('publish-now')
   async publishNow(@Request() req: any, @Body() body: Partial<SchedulePostDto>) {
     if (!body.platform || !body.content) {
       throw new BadRequestException('Platform and content are required');
+    }
+    
+    // DEBUG: Log incoming payload
+    console.log('[Posts Controller] Publish-now request:', {
+      platform: body.platform,
+      contentLength: body.content?.length,
+      mediaUrl: body.mediaUrl,
+      mediaType: body.mediaType,
+      postType: body.postType,
+      mediaUrls: body.mediaUrls ? `[${body.mediaUrls.length} items]` : 'undefined',
+    });
+    
+    // ISSUE FIX: Validate required fields before publishing
+    const p = (body.platform || '').toLowerCase();
+    if (p === 'instagram') {
+      if (!body.mediaUrl && (!body.mediaUrls || body.mediaUrls.length === 0)) {
+        throw new BadRequestException('Instagram posts require media (image, video, or reel). Please upload a media file before publishing.');
+      }
+      // VALIDATE mediaType for Instagram
+      if (!body.mediaType) {
+        console.warn('[Posts Controller] WARNING: mediaType is not set for Instagram! Will auto-detect from URL.');
+      }
+    }
+    if (p === 'facebook') {
+      const hasMedia = body.mediaUrl || (body.mediaUrls && body.mediaUrls.length > 0);
+      const hasLink = body.linkUrl;
+      if (!hasMedia && !hasLink) {
+        throw new BadRequestException('Facebook posts require either media (image/video) or a link URL. Please add media or a link before publishing.');
+      }
     }
     
     const result = await this.metaService.publishPost(
